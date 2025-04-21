@@ -1,9 +1,9 @@
-﻿using Den.Dev.LocalMCP.WAM.Win32;
+﻿using Den.Dev.LocalMCP.WAM.Models;
+using Den.Dev.LocalMCP.WAM.Win32;
 using Microsoft.Extensions.Logging;
 using Microsoft.Identity.Client;
 using Microsoft.Identity.Client.Broker;
 using Microsoft.Identity.Client.Extensions.Msal;
-using System.Runtime.InteropServices;
 
 namespace Den.Dev.LocalMCP.WAM
 {
@@ -22,6 +22,9 @@ namespace Den.Dev.LocalMCP.WAM
 
         public static async Task<AuthenticationService> CreateAsync(ILogger<AuthenticationService> logger)
         {
+            // Initialize the static logger first so it's available for all static methods
+            _logger = logger;
+
             var storageProperties =
                 new StorageCreationPropertiesBuilder("authcache.bin", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Den.Dev.LocalMCP.WAM"))
                 .Build();
@@ -32,7 +35,7 @@ namespace Den.Dev.LocalMCP.WAM
                 .Create(_clientId)
                 .WithAuthority(AadAuthorityAudience.AzureAdMyOrg)
                 .WithTenantId("b811a652-39e6-4a0c-b563-4279a1dd5012")
-                .WithParentActivityOrWindow(GetConsoleOrTerminalWindow)
+                .WithParentActivityOrWindow(GetBindingParentWindow)
                 .WithBroker(new BrokerOptions(BrokerOptions.OperatingSystems.Windows))
                 .Build();
 
@@ -77,109 +80,135 @@ namespace Den.Dev.LocalMCP.WAM
             }
         }
 
-
-
-
-        private static IntPtr GetConsoleOrTerminalWindow()
+        private static IntPtr GetBindingParentWindow()
         {
-            _logger.LogInformation("Attempting to get console or terminal window handle");
-            
-            // Attempt 1: Get console window handle
-            IntPtr consoleHandle = NativeBridge.GetConsoleWindow();
-            _logger.LogInformation($"Console handle: {consoleHandle}");
-            
-            // If we have a valid console handle, try to get its ancestor
-            if (consoleHandle != IntPtr.Zero)
+            _logger.LogInformation("Finding parent process window for authentication binding");
+
+            var currentProcessId = Environment.ProcessId;
+            return FindWindowInProcessHierarchy(currentProcessId);
+        }
+
+        private static IntPtr FindWindowInProcessHierarchy(int processId, int hierarchyLevel = 0, int maxLevels = 5)
+        {
+            if (hierarchyLevel >= maxLevels)
             {
-                IntPtr ancestorHandle = NativeBridge.GetAncestor(consoleHandle, NativeBridge.GetAncestorFlags.GetRootOwner);
-                _logger.LogInformation($"Ancestor handle: {ancestorHandle}");
-                
-                if (ancestorHandle != IntPtr.Zero)
-                {
-                    return ancestorHandle;
-                }
-                else
-                {
-                    _logger.LogWarning("GetAncestor returned zero, falling back to console handle");
-                    return consoleHandle; // Return console handle as fallback
-                }
+                _logger.LogWarning($"Reached maximum process hierarchy level ({maxLevels}), falling back to desktop window");
+                IntPtr desktopWindow = NativeBridge.GetDesktopWindow();
+                _logger.LogInformation($"Using desktop window as fallback: {desktopWindow}");
+                return desktopWindow;
             }
-            
-            // Attempt 2: Try to get parent process window handle
+
+            _logger.LogInformation($"Looking for window in process {processId} (hierarchy level {hierarchyLevel})");
+
             try
             {
-                using var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
-                _logger.LogInformation($"Current process ID: {currentProcess.Id}");
-                
-                // Try to get the current process main window handle first
-                if (currentProcess.MainWindowHandle != IntPtr.Zero)
+                using var process = System.Diagnostics.Process.GetProcessById(processId);
+
+                // First try: get the main window directly from this process
+                if (process.MainWindowHandle != IntPtr.Zero)
                 {
-                    _logger.LogInformation($"Using current process main window handle: {currentProcess.MainWindowHandle}");
-                    return currentProcess.MainWindowHandle;
+                    _logger.LogInformation($"Found window from process {process.ProcessName} (ID: {processId}): {process.MainWindowHandle}");
+                    return process.MainWindowHandle;
                 }
-                
-                // Otherwise, try parent process
-                var parentProcessId = NativeBridge.GetParentProcessId(currentProcess.Id);
-                _logger.LogInformation($"Parent process ID: {parentProcessId}");
-                
-                if (parentProcessId != 0)
+
+                // Try to find any visible window from this process
+                IntPtr windowHandle = FindWindowForProcess(processId);
+                if (windowHandle != IntPtr.Zero)
                 {
-                    try
-                    {
-                        using var parentProcess = System.Diagnostics.Process.GetProcessById(parentProcessId);
-                        var parentHandle = parentProcess.MainWindowHandle;
-                        _logger.LogInformation($"Parent process handle: {parentHandle}");
-                        
-                        if (parentHandle != IntPtr.Zero)
-                        {
-                            return parentHandle;
-                        }
-                    }
-                    catch (ArgumentException ex)
-                    {
-                        _logger.LogWarning($"Parent process {parentProcessId} no longer exists: {ex.Message}");
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError($"Error accessing parent process: {ex.Message}");
-                    }
+                    return windowHandle;
                 }
-                
-                // Attempt 3: Find a suitable window from all running processes (last resort)
-                _logger.LogInformation("Attempting to find other suitable window handles");
-                var processes = System.Diagnostics.Process.GetProcesses();
-                foreach (var possibleParent in processes)
+
+                // If we can't find a window, try to get the parent process
+                _logger.LogInformation($"No suitable window found for process {process.ProcessName} (ID: {processId}), checking parent process");
+
+                try
                 {
-                    try
+                    int parentProcessId = NativeBridge.GetParentProcessId(processId);
+
+                    // Skip if we hit system processes or invalid ones
+                    if (parentProcessId <= 4 || parentProcessId == processId)
                     {
-                        // Look for known terminal or shell processes
-                        if ((possibleParent.ProcessName.Contains("cmd") || 
-                             possibleParent.ProcessName.Contains("powershell") ||
-                             possibleParent.ProcessName.Contains("terminal") ||
-                             possibleParent.ProcessName.Contains("explorer")) && 
-                            possibleParent.MainWindowHandle != IntPtr.Zero)
-                        {
-                            _logger.LogInformation($"Found potential parent window in {possibleParent.ProcessName}: {possibleParent.MainWindowHandle}");
-                            return possibleParent.MainWindowHandle;
-                        }
+                        _logger.LogInformation($"Reached system process or invalid parent (ID: {parentProcessId}), stopping hierarchy search");
+                        IntPtr desktopWindow = NativeBridge.GetDesktopWindow();
+                        _logger.LogInformation($"Using desktop window as fallback: {desktopWindow}");
+                        return desktopWindow;
                     }
-                    catch (Exception)
-                    {
-                        // Skip this process if we can't access it
-                        continue;
-                    }
-                    finally
-                    {
-                        possibleParent.Dispose();
-                    }
+
+                    // Recursively check the parent process
+                    return FindWindowInProcessHierarchy(parentProcessId, hierarchyLevel + 1, maxLevels);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"Failed to get parent process for {processId}: {ex.Message}");
+                    // Fall through to desktop window
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Failed to retrieve any window handle: {ex.Message}");
+                _logger.LogWarning($"Failed to access process {processId}: {ex.Message}");
+                // Fall through to desktop window
             }
-            
-            _logger.LogWarning("Returning IntPtr.Zero as window handle - authentication may require additional user interaction");
+
+            // If we've exhausted all options, return desktop window
+            IntPtr desktop = NativeBridge.GetDesktopWindow();
+            _logger.LogInformation($"Using desktop window as final fallback: {desktop}");
+            return desktop;
+        }
+
+        private static IntPtr FindWindowForProcess(int processId)
+        {
+            var windowCandidates = new List<WindowCandidate>();
+
+            NativeBridge.EnumWindowsProc enumProc = (hWnd, lParam) =>
+            {
+                // We're really not interested in invisible windows.
+                if (!NativeBridge.IsWindowVisible(hWnd))
+                    return true;
+
+                // No tiny windows need to be considered (bar is 50x50).
+                NativeBridge.RECT rect;
+                if (!NativeBridge.GetWindowRect(hWnd, out rect) || !rect.IsValidSize)
+                    return true;
+
+                NativeBridge.GetWindowThreadProcessId(hWnd, out uint windowProcessId);
+
+                if (windowProcessId != processId)
+                    return true;
+
+                var titleBuilder = new System.Text.StringBuilder(256);
+                NativeBridge.GetWindowText(hWnd, titleBuilder, titleBuilder.Capacity);
+                var title = titleBuilder.ToString();
+
+                // Add window as a candidate for potential parent
+                // windows that we will use to parent WAM to.
+                // Windows with a title are more relevant (IMO), so
+                // we give them a higher score.
+                windowCandidates.Add(new WindowCandidate
+                {
+                    Handle = hWnd,
+                    ProcessId = (int)windowProcessId,
+                    Score = string.IsNullOrEmpty(title) ? 5 : 10,
+                    Title = title,
+                    Size = rect.Width * rect.Height
+                });
+
+                return true;
+            };
+
+            NativeBridge.EnumWindows(enumProc, IntPtr.Zero);
+
+            var bestWindow = windowCandidates
+                .OrderByDescending(w => w.Score)
+                .ThenByDescending(w => w.Size)
+                .FirstOrDefault();
+
+            if (bestWindow != null && bestWindow.Handle != IntPtr.Zero)
+            {
+                _logger.LogInformation($"Found window for process {processId}: '{bestWindow.Title}' with handle {bestWindow.Handle}");
+                return bestWindow.Handle;
+            }
+
+            _logger.LogInformation($"No suitable windows found for process {processId}");
             return IntPtr.Zero;
         }
     }

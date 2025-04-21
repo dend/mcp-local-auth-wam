@@ -13,11 +13,22 @@ namespace Den.Dev.LocalMCP.WAM
     {
         static async Task Main(string[] args)
         {
+            var logDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Den.Dev.LocalMCP.WAM");
+            var logFilePath = Path.Combine(logDirectory, "app.log");
+            
+            if (!Directory.Exists(logDirectory))
+            {
+                Directory.CreateDirectory(logDirectory);
+            }
+            
             var builder = Host.CreateApplicationBuilder(args);
+            
             builder.Logging.AddConsole(consoleLogOptions =>
             {
                 consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
             });
+
+            builder.Logging.AddFile(logFilePath, fileSizeLimitBytes: 10 * 1024 * 1024, retainedFileCountLimit: 5, minimumLevel: LogLevel.Debug);
 
             builder.Services
                 .AddSingleton(serviceProvider =>
@@ -102,5 +113,4 @@ namespace Den.Dev.LocalMCP.WAM
 
         public AllowedHostsValidator AllowedHostsValidator { get; }
     }
-
 }
