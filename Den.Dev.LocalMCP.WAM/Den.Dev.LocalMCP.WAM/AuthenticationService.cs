@@ -181,13 +181,12 @@ namespace Den.Dev.LocalMCP.WAM
 
                 // Add window as a candidate for potential parent
                 // windows that we will use to parent WAM to.
-                // Windows with a title are more relevant (IMO), so
-                // we give them a higher score.
+                // Windows with a title are more relevant, so
+                // we prioritize them in our selection.
                 windowCandidates.Add(new WindowCandidate
                 {
                     Handle = hWnd,
                     ProcessId = (int)windowProcessId,
-                    Score = string.IsNullOrEmpty(title) ? 5 : 10,
                     Title = title,
                     Size = rect.Width * rect.Height
                 });
@@ -198,7 +197,7 @@ namespace Den.Dev.LocalMCP.WAM
             NativeBridge.EnumWindows(enumProc, IntPtr.Zero);
 
             var bestWindow = windowCandidates
-                .OrderByDescending(w => w.Score)
+                .OrderByDescending(w => !string.IsNullOrEmpty(w.Title))
                 .ThenByDescending(w => w.Size)
                 .FirstOrDefault();
 
